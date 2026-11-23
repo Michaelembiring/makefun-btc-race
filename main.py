@@ -1,10 +1,20 @@
-"""BTC trend-following bot for make.fun btc-race-24h-20261123-0511.
+"""Long-biased cbBTC trend follower for make.fun's btc-race-24h-20261123-0511.
 
-Speaks agent-fun/bars-replay/v1 on stdin/stdout via the vendor shim
-(repo/vendor/makefun_bars.py). Strategy: EMA(64) trend filter for entry, a 4%
-hard stop off the best close while holding, and a deep EMA trail for the exit.
-It holds trends rather than scalping (a round trip costs ~12 bps before impact).
-Deterministic: no clock, no network, no files, no unseeded randomness.
+Speaks agent-fun/bars-replay/v1 via the vendored makefun_bars shim. A round trip
+on these bars costs about 12 bps before impact (a 4 bps fee and 2 bps of slippage
+each way), so the bot holds a trend and only lets go when the trend breaks:
+
+- Entry, while flat: buy the cash on hand (capped by the max weight) once the
+  close is above its EMA(64); before the EMA can be seeded, buy on the first
+  batch the bot may trade on, so the scored window always trades.
+- Exit, while held: sell the whole position on the first close at or below the
+  best close since entry times 0.96 (the 4% hard stop) or at or below
+  EMA(64) * 0.63 (the trail). Both are measured on closes and fill at the next
+  open, so one spike through a level does not churn the book.
+- Re-entry: after an exit, buy again once the close is back above its EMA.
+
+No clock, no environment, no unseeded randomness: two runs over the same bars
+produce byte-identical replies.
 """
 
 import os
@@ -13,25 +23,18 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor"))
 import makefun_bars
 
-SYMBOL = "CBBTC"
-EMA_PERIOD = 64
-SLIP = 10_000  # max_slippage_bps (100%): never reject on modelled slippage
-
-# Per-symbol close series (price raw units) and the best close seen while holding.
 closes = {}
 best = {}
 
 
-def _ema(period, series):
-    """EMA over ``series``: None until ``period`` samples, then seed the mean of
-    the first ``period`` and fold the rest with alpha = 2/(period+1)."""
-    if len(series) < period:
+def ema64(series):
+    """The EMA(64) of the whole series, seeded with the SMA of the first 64 closes; None before that."""
+    if len(series) < 64:
         return None
-    e = sum(series[:period]) / period
-    alpha = 2.0 / (period + 1)
-    for v in series[period:]:
-        e += alpha * (v - e)
-    return e
+    seed = sum(series[:64]) / 64
+    for v in series[64:]:
+        seed += (2 / 65) * (v - seed)
+    return seed
 
 
 def on_hello(state):
@@ -42,42 +45,30 @@ def on_hello(state):
 def on_batch(state, batch):
     for bar in batch["bars"]:
         closes.setdefault(bar["symbol"], []).append(int(bar["c"]))
-
     if state.warming_up:
         return []
 
-    held = state.positions.get(SYMBOL)
-    close = state.close(SYMBOL)
-    ema = _ema(EMA_PERIOD, closes.get(SYMBOL, ()))
+    series = closes["CBBTC"]
+    close = state.close("CBBTC")
+    held = state.positions.get("CBBTC")
 
-    if held is not None:
-        # Holding: track the best close, then test the 4% hard stop and the trail.
-        b = best.get(SYMBOL)
-        b = max(b or close, close)
-        best[SYMBOL] = b
-        if close * 100 <= b * 96 or (ema is not None and close * 100 <= ema * 63):
-            return [{
-                "side": "sell",
-                "symbol": SYMBOL,
-                "qty": str(held.qty),
-                "max_slippage_bps": SLIP,
-            }]
+    if held:
+        best["CBBTC"] = max(best.get("CBBTC") or close, close)
+        e = ema64(series)
+        if close * 100 <= best["CBBTC"] * 96 or (e is not None and close * 100 <= e * 63):
+            best["CBBTC"] = None
+            return [dict(side="sell", symbol="CBBTC", qty=str(held.qty), max_slippage_bps=10000)]
         return []
 
-    # Flat: only enter in an uptrend (or before the EMA warms up, ema is None).
-    if ema is not None and close <= ema:
+    e = ema64(series)
+    if e is not None and close <= e:
         return []
-    room = state.weight_room(SYMBOL)
-    slice_ = min(state.cash, room)
-    if slice_ < int(state.hello["fees"]["min_notional_quote_units"]):
+    room = state.weight_room("CBBTC")
+    slc = min(state.cash, room)
+    if slc < int(state.hello["fees"]["min_notional_quote_units"]):
         return []
-    best[SYMBOL] = close
-    return [{
-        "side": "buy",
-        "symbol": SYMBOL,
-        "notional_quote_units": str(slice_),
-        "max_slippage_bps": SLIP,
-    }]
+    best["CBBTC"] = close
+    return [dict(side="buy", symbol="CBBTC", notional_quote_units=str(slc), max_slippage_bps=10000)]
 
 
 def on_done(state, done):
