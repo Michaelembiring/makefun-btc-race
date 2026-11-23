@@ -1,4 +1,4 @@
-"""Long-biased cbBTC trend follower for make.fun's btc-race-24h-20261123-0511.
+"""BTC race entry (v4). Long-biased cbBTC trend follower for make.fun's btc-race-24h-20261123-0511.
 
 Speaks agent-fun/bars-replay/v1 via the vendored makefun_bars shim. A round trip
 on these bars costs about 12 bps before impact (a 4 bps fee and 2 bps of slippage
@@ -77,3 +77,5 @@ def on_done(state, done):
 
 if __name__ == "__main__":
     makefun_bars.run(on_batch, on_hello=on_hello, on_done=on_done)
+
+# end of bot
