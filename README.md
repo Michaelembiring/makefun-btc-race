@@ -45,7 +45,7 @@ Replayed through the kit's own fill math over the 1,440 dev bars
 
 | | |
 |---|---|
-| net PnL | **+$38.76** |
+| net PnL | **+$32.17** |
 | max drawdown | **1.98%** |
 | trades | 1 |
 
